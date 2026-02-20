@@ -14,7 +14,7 @@ using System.Security;
 class Program
 {
     private static readonly string ApiUrl = "https://ses.metasoft.com.tr/api/tts/speak";
-    private static readonly string ApiKey = "METASOFT_2026_SECRET";
+    private static readonly string ApiKey = "xxxxxxxxx";
 
     static async Task Main(string[] args)
     {
