@@ -14,7 +14,7 @@ using System.Security;
 class Program
 {
     private static readonly string ApiUrl = "https://ses.metasoft.com.tr/api/tts/speak";
-    private static readonly string ApiKey = "xxxxxxxxx";
+    private static readonly string ApiKey = "xxxxxxxx";
 
     static async Task Main(string[] args)
     {
@@ -148,29 +148,61 @@ class Program
         if (string.IsNullOrWhiteSpace(input))
             return input;
 
-        // Eğer "|" varsa öncesini at
-        if (input.Contains("|"))
+        input = input.Trim();
+
+        bool hasPipe = input.Contains("|");
+
+        // =========================================
+        // 1️⃣ PIPE VARSA → PREFIX SİL + FORMATLA
+        // =========================================
+        if (hasPipe)
         {
-            var parts = input.Split('|');
-            input = parts.Last().Trim();
+            // | öncesini sil
+            input = input.Split('|').Last().Trim();
+
+            // başta sayın varsa kaldır
+            if (input.ToLower().StartsWith("sayın "))
+                input = input.Substring(6).Trim();
+
+            var commaIndex = input.IndexOf(',');
+
+            if (commaIndex > 0)
+            {
+                var namePart = input.Substring(0, commaIndex).Trim();
+                var rest = input.Substring(commaIndex + 1).Trim();
+
+                return $"Sayın {namePart}, {namePart} {rest}";
+            }
+            else
+            {
+                return $"Sayın {input}, {input}";
+            }
         }
 
-        // Türkçe karakter düzeltme sonrası çalışacağı için
-        // virgül pozisyonunu bul
-        var commaIndex = input.IndexOf(',');
-
-        if (commaIndex > 0)
-        {
-            var namePart = input.Substring(0, commaIndex).Trim();
-            var rest = input.Substring(commaIndex + 1).Trim();
-
-            // Başına sayın ekle ve ismi tekrar et
-            return $"Sayın {namePart}, {namePart}, {rest}";
-        }
+        // =========================================
+        // 2️⃣ PIPE YOKSA → SADECE İSMİ TEKRAR ET
+        // =========================================
         else
         {
-            // Virgül yoksa sadece iki kere söyle
-            return $"Sayın {input}, {input}";
+            var commaIndex = input.IndexOf(',');
+
+            if (commaIndex > 0)
+            {
+                var beforeComma = input.Substring(0, commaIndex).Trim();
+                var rest = input.Substring(commaIndex + 1).Trim();
+
+                // "sayın süleyla aktürk"
+                string nameOnly = beforeComma;
+
+                if (beforeComma.ToLower().StartsWith("sayın "))
+                    nameOnly = beforeComma.Substring(6).Trim();
+
+                return $"{beforeComma}, {nameOnly} {rest}";
+            }
+            else
+            {
+                return input;
+            }
         }
     }
 
