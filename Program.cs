@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Windows.Media.Core;
 using Windows.Media.Playback;
@@ -14,7 +15,12 @@ using System.Security;
 class Program
 {
     private static readonly string ApiUrl = "https://ses.metasoft.com.tr/api/tts/speak";
-    private static readonly string ApiKey = "xxxxxxxx";
+    private static readonly string ApiKey = "METASOFT_2026_SECRET";
+
+    private static readonly HttpClient client = new HttpClient
+    {
+        Timeout = TimeSpan.FromSeconds(3)
+    };
 
     static async Task Main(string[] args)
     {
@@ -27,26 +33,37 @@ class Program
             string metin = args[1];
             string? wavDosya = args.Length >= 3 ? args[2] : null;
 
-            // 🔥 PREFIX TEMİZLEME + İSİM TEKRAR
             metin = CleanPrefix(metin);
-
-            // 🔥 Encoding düzeltme
             metin = FixEncoding(metin);
 
-            // 🔔 Ding çal (SADECE LOCAL)
+            // 🔔 Ding
             if (!string.IsNullOrEmpty(wavDosya) && File.Exists(wavDosya))
             {
-                await PlayWavAsync(wavDosya);
+                if (IsWin10OrGreater())
+                    await SafePlayWavAsync(wavDosya);
             }
 
-            // 🌐 Web API dene
-            bool apiSuccess = await TryApiSpeak(metin);
-
-            // ❌ API başarısızsa LOCAL konuş
-            if (!apiSuccess)
+            // ==============================
+            // 🔥 ÖNCELİK 1 → TÜRKÇE LOCAL
+            // ==============================
+            if (IsWin10OrGreater() && HasTurkishVoiceSafe())
             {
-                await LocalSpeak(metin);
+                bool localOk = await LocalSpeakSafe(metin);
+                if (localOk)
+                    return;
             }
+
+            // ==============================
+            // 🔥 ÖNCELİK 2 → API
+            // ==============================
+            string apiMetin = PrepareApiText(metin);
+            bool apiSuccess = await TryApiSpeak(apiMetin);
+            if (apiSuccess)
+                return;
+
+            // ==============================
+            // 🔥 ÖNCELİK 3 → SESSİZ
+            // ==============================
         }
         catch (Exception ex)
         {
@@ -55,35 +72,52 @@ class Program
     }
 
     // ==============================
-    // API ÇAĞRISI
+    // OS KONTROL
     // ==============================
-    static async Task<bool> TryApiSpeak(string text)
+    static bool IsWin10OrGreater()
+    {
+        return Environment.OSVersion.Version.Major >= 10;
+    }
+
+    // ==============================
+    // TÜRKÇE SES VAR MI (SAFE)
+    // ==============================
+    static bool HasTurkishVoiceSafe()
     {
         try
         {
-            using var client = new HttpClient();
-            client.Timeout = TimeSpan.FromSeconds(3);
-            client.DefaultRequestHeaders.Add("x-api-key", ApiKey);
+            return SpeechSynthesizer.AllVoices
+                .Any(v => v.Language.StartsWith("tr", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
-            var json = JsonSerializer.Serialize(new
-            {
-                text = text,
-                ding = false
-            });
+    // ==============================
+    // LOCAL TTS (SAFE)
+    // ==============================
+    static async Task<bool> LocalSpeakSafe(string metin)
+    {
+        try
+        {
+            var synth = new SpeechSynthesizer();
 
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var turkishVoice = SpeechSynthesizer.AllVoices
+                .FirstOrDefault(v => v.Language.StartsWith("tr", StringComparison.OrdinalIgnoreCase));
 
-            var response = await client.PostAsync(ApiUrl, content);
-
-            if (!response.IsSuccessStatusCode)
+            if (turkishVoice == null)
                 return false;
 
-            var bytes = await response.Content.ReadAsByteArrayAsync();
+            synth.Voice = turkishVoice;
+            synth.Options.SpeakingRate = 0.95;
+            synth.Options.AudioVolume = 1.0;
 
-            string tempPath = Path.Combine(Path.GetTempPath(), "tts_temp.wav");
-            File.WriteAllBytes(tempPath, bytes);
+            string ssml = BuildSsml(metin);
 
-            await PlayWavAsync(tempPath);
+            var stream = await synth.SynthesizeSsmlToStreamAsync(ssml);
+            await PlayStreamAsync(stream);
 
             return true;
         }
@@ -94,54 +128,106 @@ class Program
     }
 
     // ==============================
-    // LOCAL TTS FALLBACK (SSML)
+    // API
     // ==============================
-    static async Task LocalSpeak(string metin)
+    static async Task<bool> TryApiSpeak(string text)
     {
-        var synth = new SpeechSynthesizer();
-        var turkishVoice = SpeechSynthesizer.AllVoices
-            .FirstOrDefault(v => v.Language.StartsWith("tr"));
+        try
+        {
+            client.DefaultRequestHeaders.Remove("x-api-key");
+            client.DefaultRequestHeaders.Add("x-api-key", ApiKey);
 
-        if (turkishVoice != null)
-            synth.Voice = turkishVoice;
+            var json = JsonSerializer.Serialize(new
+            {
+                text = text,
+                ding = false
+            });
 
-        synth.Options.SpeakingRate = 0.95;
-        synth.Options.AudioVolume = 1.0;
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        string ssml = BuildSsml(metin);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
-        var stream = await synth.SynthesizeSsmlToStreamAsync(ssml);
-        await PlayStreamAsync(stream);
+            var response = await client.PostAsync(ApiUrl, content, cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+                return false;
+
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+
+            string tempPath = Path.Combine(Path.GetTempPath(), "tts_temp.wav");
+            File.WriteAllBytes(tempPath, bytes);
+
+            if (IsWin10OrGreater())
+                await SafePlayWavAsync(tempPath);
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // ==============================
-    // WAV ÇAL
+    // WAV ÇAL (SAFE)
     // ==============================
-    static async Task PlayWavAsync(string path)
+    static async Task SafePlayWavAsync(string path)
     {
-        StorageFile file = await StorageFile.GetFileFromPathAsync(path);
-        var stream = await file.OpenAsync(FileAccessMode.Read);
+        try
+        {
+            var tcs = new TaskCompletionSource<bool>();
 
-        using var player = new MediaPlayer();
-        player.Volume = 1.0;
-        player.Source = MediaSource.CreateFromStream(stream, file.ContentType);
-        player.Play();
+            StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+            var stream = await file.OpenAsync(FileAccessMode.Read);
 
-        await Task.Delay(1500);
+            using var player = new MediaPlayer();
+            player.Volume = 1.0;
+            player.Source = MediaSource.CreateFromStream(stream, file.ContentType);
+
+            player.MediaEnded += (s, e) =>
+            {
+                tcs.TrySetResult(true);
+            };
+
+            player.MediaFailed += (s, e) =>
+            {
+                tcs.TrySetResult(true);
+            };
+
+            player.Play();
+
+            await tcs.Task;
+        }
+        catch
+        {
+        }
     }
 
     static async Task PlayStreamAsync(SpeechSynthesisStream stream)
     {
+        var tcs = new TaskCompletionSource<bool>();
+
         using var player = new MediaPlayer();
         player.Volume = 1.0;
         player.Source = MediaSource.CreateFromStream(stream, stream.ContentType);
+
+        player.MediaEnded += (s, e) =>
+        {
+            tcs.TrySetResult(true);
+        };
+
+        player.MediaFailed += (s, e) =>
+        {
+            tcs.TrySetResult(true);
+        };
+
         player.Play();
 
-        await Task.Delay((int)(stream.Size / 25));
+        await tcs.Task;
     }
 
     // ==============================
-    // PREFIX TEMİZLEME + İSİM TEKRAR + DURAKLAMA
+    // CLEAN PREFIX (AYNEN)
     // ==============================
     static string CleanPrefix(string input)
     {
@@ -149,18 +235,12 @@ class Program
             return input;
 
         input = input.Trim();
-
         bool hasPipe = input.Contains("|");
 
-        // =========================================
-        // 1️⃣ PIPE VARSA → PREFIX SİL + FORMATLA
-        // =========================================
         if (hasPipe)
         {
-            // | öncesini sil
             input = input.Split('|').Last().Trim();
 
-            // başta sayın varsa kaldır
             if (input.ToLower().StartsWith("sayın "))
                 input = input.Substring(6).Trim();
 
@@ -170,7 +250,6 @@ class Program
             {
                 var namePart = input.Substring(0, commaIndex).Trim();
                 var rest = input.Substring(commaIndex + 1).Trim();
-
                 return $"Sayın {namePart}, {namePart} {rest}";
             }
             else
@@ -178,10 +257,6 @@ class Program
                 return $"Sayın {input}, {input}";
             }
         }
-
-        // =========================================
-        // 2️⃣ PIPE YOKSA → SADECE İSMİ TEKRAR ET
-        // =========================================
         else
         {
             var commaIndex = input.IndexOf(',');
@@ -191,7 +266,6 @@ class Program
                 var beforeComma = input.Substring(0, commaIndex).Trim();
                 var rest = input.Substring(commaIndex + 1).Trim();
 
-                // "sayın süleyla aktürk"
                 string nameOnly = beforeComma;
 
                 if (beforeComma.ToLower().StartsWith("sayın "))
@@ -206,19 +280,6 @@ class Program
         }
     }
 
-    static string InsertBreaks(string text, string name)
-    {
-        // ismi iki kere söyle: "sayın süleyla aktürk <break/> süleyla aktürk"
-        if (text.Contains(name))
-        {
-            text = text.Replace(name + " " + name, $"{name} <break time='400ms'/> {name}");
-        }
-        return text;
-    }
-
-    // ==============================
-    // SSML OLUŞTUR
-    // ==============================
     static string BuildSsml(string text)
     {
         text = SecurityElement.Escape(text);
@@ -233,9 +294,6 @@ class Program
 </speak>";
     }
 
-    // ==============================
-    // TÜRKÇE KARAKTER DÜZELTME
-    // ==============================
     static string FixEncoding(string text)
     {
         if (string.IsNullOrEmpty(text))
@@ -259,6 +317,21 @@ class Program
 
         foreach (var (wrong, correct) in replacements)
             text = text.Replace(wrong, correct);
+
+        return text;
+    }
+    static string PrepareApiText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
+
+        string lower = text.ToLower();
+
+        if (!lower.Contains("lütfen içeriye giriniz"))
+        {
+            text = text.Trim().TrimEnd(',');
+            text += ", lütfen içeriye giriniz";
+        }
 
         return text;
     }
